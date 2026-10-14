@@ -1,7 +1,7 @@
-group: io.kestra.plugin.templates
-name: "template"
-title: "Template"
-description: "Plugin template for Kestra"
+group: io.kestra.plugin.firecrawl
+name: "firecrawl"
+title: "Firecrawl"
+description: "Firecrawl plugin for Kestra"
 body: ""
 videos: []
 createdBy: "Kestra Core Team"

@@ -1,10 +1,10 @@
 {
-  "name": "plugin-template",
+  "name": "plugin-firecrawl",
   "build": {
     "context": ".",
     "dockerfile": "Dockerfile"
   },
-  "workspaceFolder": "/workspaces/plugin-template",
+  "workspaceFolder": "/workspaces/plugin-firecrawl",
   "forwardPorts": [8080],
   "customizations": {
     "vscode": {
