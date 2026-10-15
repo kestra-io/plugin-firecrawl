@@ -1,16 +1,14 @@
-This is the Kestra plugin template. Use it as a starting point for building a new plugin.
+Use the Firecrawl plugin to turn web pages into clean, LLM-ready content inside a flow.
 
-## What this template ships
+## What this plugin ships
 
-- `Example` is a sample `RunnableTask` that reverses an input string.
-- `Trigger` is a sample polling trigger that fires an execution at random.
+- `Scrape` scrapes a single URL and returns its content as markdown, HTML, links or other formats.
+- `Crawl` crawls a website from a start URL, waits for the crawl to finish and stores every page in the internal storage.
 
-## How to build your plugin
+## How to use it
 
-1. Rename the package `io.kestra.plugin.firecrawl` to your own, for example `io.kestra.plugin.myservice`.
-2. Update `group`, `name`, `title`, and `description` in `src/main/resources/metadata/index.yaml`.
-3. Replace `src/main/resources/icons/plugin-icon.svg` with your service's icon.
-4. Replace the `Example` and `Trigger` classes with your real tasks and triggers.
-5. Replace this how-to with documentation for your plugin.
+1. Create a Firecrawl API key and store it as a Kestra secret, for example `FIRECRAWL_API_KEY`.
+2. Reference it with `apiKey: "{{ secret('FIRECRAWL_API_KEY') }}"` on each task.
+3. Use the `uri` output, an ION file with one row per page, in downstream tasks such as `io.kestra.plugin.serdes.json.IonToJson` or a database or vector store loader.
 
-Run `./gradlew lintPluginDocs` before pushing to validate the plugin documentation.
+To target a self-hosted Firecrawl instance, set `baseUrl` to its address without the `/v2` suffix.

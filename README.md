@@ -39,14 +39,14 @@
 
 ## Why
 
-- What user problem does this solve? Teams need a concrete starting point for building and validating new Kestra plugins without recreating the same project scaffolding from scratch.
-- Why would a team adopt this plugin in a workflow? It gives plugin authors a ready-made reference repo they can adapt alongside their own build, test, and publishing workflow.
-- What operational/business outcome does it enable? It shortens plugin delivery time, reduces setup mistakes, and makes internal or partner plugin development more repeatable.
+- What user problem does this solve? Flows that feed RAG pipelines, monitor competitor pages or collect web data need clean, structured page content, and the Firecrawl API is asynchronous for crawls.
+- Why would a team adopt this plugin in a workflow? It scrapes or crawls sites in one task, downloads the results to the internal storage before they expire and cancels the crawl when the task is killed so it stops consuming credits.
+- What operational/business outcome does it enable? Web ingestion becomes a declarative, retryable step that plugs directly into AI, database and notification tasks.
 
 ## What
 
 - Provides plugin components under `io.kestra.plugin.firecrawl`.
-- Includes classes such as `Example`, `Trigger`.
+- Includes classes such as `Scrape` and `Crawl`.
 
 ## Running Kestra locally with this plugin
 
