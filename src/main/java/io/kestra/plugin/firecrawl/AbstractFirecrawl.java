@@ -1,34 +1,21 @@
 package io.kestra.plugin.firecrawl;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 import com.firecrawl.client.FirecrawlClient;
-import com.firecrawl.models.Document;
 import com.firecrawl.models.ScrapeOptions;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
-import io.kestra.core.serializers.FileSerde;
-import io.kestra.core.serializers.JacksonMapper;
 
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-import reactor.core.publisher.Flux;
 
-/**
- * Base class for Firecrawl tasks: connection settings, page-level scrape options and result storage.
- */
 @SuperBuilder
 @ToString
 @EqualsAndHashCode
@@ -55,37 +42,31 @@ public abstract class AbstractFirecrawl extends Task implements FirecrawlInterfa
 
     protected Property<Duration> requestTimeout;
 
-    /**
-     * Creates a Firecrawl SDK client from the rendered connection properties.
-     */
     protected FirecrawlClient client(RunContext runContext) throws IllegalVariableEvaluationException {
-        FirecrawlClient.Builder builder = FirecrawlClient.builder()
-            .apiKey(runContext.render(this.apiKey).as(String.class).orElseThrow());
+        var builder = FirecrawlClient.builder()
+            .apiKey(runContext.render(this.apiKey).as(String.class).orElseThrow(() -> new IllegalArgumentException("apiKey is required")));
 
         runContext.render(this.baseUrl).as(String.class).ifPresent(builder::apiUrl);
 
         return builder.build();
     }
 
-    /**
-     * Builds the page-level scrape options shared by {@code Scrape} and {@code Crawl}.
-     */
     protected ScrapeOptions scrapeOptions(RunContext runContext) throws IllegalVariableEvaluationException {
-        ScrapeOptions.Builder builder = ScrapeOptions.builder();
+        var builder = ScrapeOptions.builder();
 
-        List<Object> renderedFormats = new ArrayList<>(runContext.render(this.formats).asList(String.class));
+        var renderedFormats = new ArrayList<Object>(runContext.render(this.formats).asList(String.class));
         if (!renderedFormats.isEmpty()) {
             builder.formats(renderedFormats);
         }
 
         runContext.render(this.onlyMainContent).as(Boolean.class).ifPresent(builder::onlyMainContent);
 
-        List<String> renderedIncludeTags = runContext.render(this.includeTags).asList(String.class);
+        var renderedIncludeTags = runContext.render(this.includeTags).asList(String.class);
         if (!renderedIncludeTags.isEmpty()) {
             builder.includeTags(renderedIncludeTags);
         }
 
-        List<String> renderedExcludeTags = runContext.render(this.excludeTags).asList(String.class);
+        var renderedExcludeTags = runContext.render(this.excludeTags).asList(String.class);
         if (!renderedExcludeTags.isEmpty()) {
             builder.excludeTags(renderedExcludeTags);
         }
@@ -96,21 +77,5 @@ public abstract class AbstractFirecrawl extends Task implements FirecrawlInterfa
             .ifPresent(duration -> builder.timeout(Math.toIntExact(duration.toMillis())));
 
         return builder.build();
-    }
-
-    /**
-     * Writes documents to an ION file in the internal storage, one row per document.
-     */
-    protected URI store(RunContext runContext, List<Document> documents) throws IOException {
-        File tempFile = runContext.workingDir().createTempFile(".ion").toFile();
-
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(tempFile), FileSerde.BUFFER_SIZE)) {
-            List<Map<String, Object>> rows = documents.stream()
-                .map(document -> JacksonMapper.toMap(document))
-                .toList();
-            FileSerde.writeAll(writer, Flux.fromIterable(rows)).block();
-        }
-
-        return runContext.storage().putFile(tempFile);
     }
 }

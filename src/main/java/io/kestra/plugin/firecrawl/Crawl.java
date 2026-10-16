@@ -1,19 +1,21 @@
 package io.kestra.plugin.firecrawl;
 
+import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.firecrawl.client.FirecrawlClient;
+import com.firecrawl.errors.RateLimitException;
 import com.firecrawl.models.CrawlJob;
 import com.firecrawl.models.CrawlOptions;
-import com.firecrawl.models.CrawlResponse;
-import com.firecrawl.models.Document;
 
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Metric;
@@ -39,7 +41,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Crawl a website with Firecrawl",
-    description = "Starts a Firecrawl crawl from a URL, waits for it to finish and stores every crawled page as one row of an ION file in the internal storage. Firecrawl keeps crawl results for a limited time, so they are downloaded as soon as the crawl completes. If the task is killed or times out, the crawl is cancelled on the Firecrawl side so it stops consuming credits."
+    description = "Starts a Firecrawl crawl from a URL, waits for it to finish and stores every crawled page as one row of an ION file in the internal storage. Firecrawl keeps crawl results for a limited time, so they are downloaded as soon as the crawl completes. If the task is killed, times out or fails while waiting, the crawl is cancelled on the Firecrawl side so it stops consuming credits."
 )
 @Plugin(
     examples = {
@@ -102,6 +104,8 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Output> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Crawl.class);
+    private static final int DEFAULT_LIMIT = 100;
+    private static final Duration MIN_POLL_FREQUENCY = Duration.ofSeconds(1);
 
     @Schema(
         title = "Start URL",
@@ -113,10 +117,11 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
 
     @Schema(
         title = "Page limit",
-        description = "Maximum number of pages to crawl."
+        description = "Maximum number of pages to crawl, at least 1. Defaults to 100."
     )
+    @Builder.Default
     @PluginProperty(group = "processing")
-    private Property<Integer> limit;
+    private Property<Integer> limit = Property.ofValue(DEFAULT_LIMIT);
 
     @Schema(
         title = "Paths to include",
@@ -134,7 +139,7 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
 
     @Schema(
         title = "Maximum discovery depth",
-        description = "Maximum number of link hops from the start URL."
+        description = "Maximum number of link hops from the start URL, at least 0."
     )
     @PluginProperty(group = "processing")
     private Property<Integer> maxDiscoveryDepth;
@@ -162,7 +167,7 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
 
     @Schema(
         title = "Maximum wait duration",
-        description = "Maximum total time to wait for the crawl to finish. When it is exceeded the crawl is cancelled on the Firecrawl side and the task fails. Defaults to 60 minutes."
+        description = "Maximum total time to wait for the crawl to finish, must be positive. When it is exceeded the crawl is cancelled on the Firecrawl side and the task fails. Defaults to 60 minutes."
     )
     @Builder.Default
     @PluginProperty(group = "execution")
@@ -170,11 +175,16 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
 
     @Schema(
         title = "Poll frequency",
-        description = "Interval between two status checks of the crawl. Defaults to 2 seconds."
+        description = "Interval between two status checks of the crawl, at least 1 second. Each status check returns the pages crawled so far, so keep it moderate for large crawls. Defaults to 5 seconds."
     )
     @Builder.Default
     @PluginProperty(group = "execution")
-    private Property<Duration> pollFrequency = Property.ofValue(Duration.ofSeconds(2));
+    private Property<Duration> pollFrequency = Property.ofValue(Duration.ofSeconds(5));
+
+    @Getter(AccessLevel.NONE)
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private final transient AtomicBoolean cancelRequested = new AtomicBoolean(false);
 
     @Getter(AccessLevel.NONE)
     @ToString.Exclude
@@ -188,64 +198,66 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
 
     @Override
     public Output run(RunContext runContext) throws Exception {
-        String renderedUrl = runContext.render(this.url).as(String.class).orElseThrow();
-        Duration renderedPollFrequency = runContext.render(this.pollFrequency).as(Duration.class).orElseThrow();
-        Duration renderedMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
+        var renderedUrl = runContext.render(this.url).as(String.class)
+            .orElseThrow(() -> new IllegalArgumentException("url is required"));
+        var renderedLimit = runContext.render(this.limit).as(Integer.class).orElse(DEFAULT_LIMIT);
+        var renderedMaxDepth = runContext.render(this.maxDiscoveryDepth).as(Integer.class);
+        var renderedPollFrequency = runContext.render(this.pollFrequency).as(Duration.class).orElse(Duration.ofSeconds(5));
+        var renderedMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElse(Duration.ofMinutes(60));
 
-        FirecrawlClient client = this.client(runContext);
-        CrawlResponse started = client.startCrawl(renderedUrl, this.crawlOptions(runContext));
-        String crawlId = started.getId();
+        validate(renderedLimit >= 1, "limit must be greater than or equal to 1");
+        validate(renderedMaxDepth.isEmpty() || renderedMaxDepth.get() >= 0, "maxDiscoveryDepth must be greater than or equal to 0");
+        validate(renderedPollFrequency.compareTo(MIN_POLL_FREQUENCY) >= 0, "pollFrequency must be at least 1 second");
+        validate(!renderedMaxDuration.isZero() && !renderedMaxDuration.isNegative(), "maxDuration must be positive");
+
+        var client = this.client(runContext);
+        var crawlId = client.startCrawl(renderedUrl, this.crawlOptions(runContext, renderedLimit, renderedMaxDepth)).getId();
 
         this.activeClient = client;
         this.activeCrawlId = crawlId;
         runContext.logger().info("Started Firecrawl crawl {} for {}", crawlId, renderedUrl);
 
-        CrawlJob job;
         try {
-            job = Await.until(
-                throwSupplier(() ->
-                {
-                    CrawlJob current = client.getCrawlStatus(crawlId);
-                    return current.isDone() ? current : null;
-                }),
-                renderedPollFrequency,
-                renderedMaxDuration
-            );
-        } catch (TimeoutException e) {
-            this.kill();
-            throw new IllegalStateException("Firecrawl crawl " + crawlId + " did not finish within " + renderedMaxDuration, e);
+            var job = this.waitForCompletion(client, crawlId, renderedPollFrequency, renderedMaxDuration);
+
+            if (!"completed".equals(job.getStatus())) {
+                throw new IllegalStateException("Firecrawl crawl " + crawlId + " ended with status '" + job.getStatus() + "'");
+            }
+
+            try (var result = ResultFile.create(runContext)) {
+                this.writePages(client, crawlId, job, renderedLimit, result);
+                var uri = result.upload();
+
+                runContext.logger().info("Crawl {} completed with {} pages", crawlId, result.count());
+                runContext.metric(Counter.of("pages", result.count()));
+                if (job.getCreditsUsed() != null) {
+                    runContext.metric(Counter.of("credits", job.getCreditsUsed()));
+                }
+
+                return Output.builder()
+                    .crawlId(crawlId)
+                    .status(job.getStatus())
+                    .pagesCount(result.count())
+                    .creditsUsed(job.getCreditsUsed())
+                    .uri(uri)
+                    .build();
+            }
+        } finally {
+            this.activeClient = null;
+            this.activeCrawlId = null;
         }
-
-        if (!"completed".equals(job.getStatus())) {
-            throw new IllegalStateException("Firecrawl crawl " + crawlId + " ended with status '" + job.getStatus() + "'");
-        }
-
-        List<Document> documents = this.collect(client, crawlId, job);
-        runContext.logger().info("Crawl {} completed with {} pages", crawlId, documents.size());
-
-        runContext.metric(Counter.of("pages", documents.size()));
-        if (job.getCreditsUsed() != null) {
-            runContext.metric(Counter.of("credits", job.getCreditsUsed()));
-        }
-
-        return Output.builder()
-            .crawlId(crawlId)
-            .status(job.getStatus())
-            .pagesCount(documents.size())
-            .creditsUsed(job.getCreditsUsed())
-            .uri(this.store(runContext, documents))
-            .build();
     }
 
-    /**
-     * Cancels the running crawl on the Firecrawl side when the task is killed or times out.
-     */
     @Override
     public void kill() {
-        FirecrawlClient client = this.activeClient;
-        String crawlId = this.activeCrawlId;
+        this.cancelCrawl();
+    }
 
-        if (client == null || crawlId == null) {
+    private void cancelCrawl() {
+        var client = this.activeClient;
+        var crawlId = this.activeCrawlId;
+
+        if (client == null || crawlId == null || !this.cancelRequested.compareAndSet(false, true)) {
             return;
         }
 
@@ -257,22 +269,47 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
         }
     }
 
-    private CrawlOptions crawlOptions(RunContext runContext) throws Exception {
-        CrawlOptions.Builder builder = CrawlOptions.builder()
-            .scrapeOptions(this.scrapeOptions(runContext));
+    private CrawlJob waitForCompletion(FirecrawlClient client, String crawlId, Duration pollFrequency, Duration maxDuration) throws Exception {
+        try {
+            return Await.until(
+                throwSupplier(() ->
+                {
+                    try {
+                        var current = client.getCrawlStatus(crawlId);
+                        return current.isDone() ? current : null;
+                    } catch (RateLimitException e) {
+                        LOGGER.warn("Firecrawl rate limited the status check of crawl {}, retrying at the next poll", crawlId);
+                        return null;
+                    }
+                }),
+                pollFrequency,
+                maxDuration
+            );
+        } catch (TimeoutException e) {
+            this.cancelCrawl();
+            throw new IllegalStateException("Firecrawl crawl " + crawlId + " did not finish within " + maxDuration, e);
+        } catch (Exception e) {
+            this.cancelCrawl();
+            throw e;
+        }
+    }
 
-        runContext.render(this.limit).as(Integer.class).ifPresent(builder::limit);
-        runContext.render(this.maxDiscoveryDepth).as(Integer.class).ifPresent(builder::maxDiscoveryDepth);
+    private CrawlOptions crawlOptions(RunContext runContext, int limit, Optional<Integer> maxDepth) throws Exception {
+        var builder = CrawlOptions.builder()
+            .scrapeOptions(this.scrapeOptions(runContext))
+            .limit(limit);
+
+        maxDepth.ifPresent(builder::maxDiscoveryDepth);
         runContext.render(this.crawlEntireDomain).as(Boolean.class).ifPresent(builder::crawlEntireDomain);
         runContext.render(this.allowExternalLinks).as(Boolean.class).ifPresent(builder::allowExternalLinks);
         runContext.render(this.allowSubdomains).as(Boolean.class).ifPresent(builder::allowSubdomains);
 
-        List<String> renderedIncludePaths = runContext.render(this.includePaths).asList(String.class);
+        var renderedIncludePaths = runContext.render(this.includePaths).asList(String.class);
         if (!renderedIncludePaths.isEmpty()) {
             builder.includePaths(renderedIncludePaths);
         }
 
-        List<String> renderedExcludePaths = runContext.render(this.excludePaths).asList(String.class);
+        var renderedExcludePaths = runContext.render(this.excludePaths).asList(String.class);
         if (!renderedExcludePaths.isEmpty()) {
             builder.excludePaths(renderedExcludePaths);
         }
@@ -281,28 +318,33 @@ public class Crawl extends AbstractFirecrawl implements RunnableTask<Crawl.Outpu
     }
 
     /**
-     * Gathers the pages of a finished crawl. Firecrawl paginates large results and exposes the next page as a cursor URL,
-     * but the SDK only follows it internally when blocking on {@code crawl(...)}, which would not let us cancel the job.
-     * The SDK builds the status request path from the job id, so the cursor query is passed along with the id.
+     * Writes the pages to the result file one response at a time, so only a single page of results is held in memory.
+     * The SDK only follows the `next` cursor inside the blocking `crawl(...)`, which cannot be cancelled, and has no
+     * method taking the cursor, so it is passed with the job id: the SDK appends the id to the request path as is.
+     * The loop stops at the page limit or when a cursor repeats, so a misbehaving server cannot make it endless.
      */
-    private List<Document> collect(FirecrawlClient client, String crawlId, CrawlJob firstPage) {
-        List<Document> documents = new ArrayList<>();
-        CrawlJob current = firstPage;
-        String previousNext = null;
+    private void writePages(FirecrawlClient client, String crawlId, CrawlJob firstPage, int limit, ResultFile result) throws IOException {
+        var visitedCursors = new HashSet<String>();
+        var page = firstPage;
 
         while (true) {
-            if (current.getData() != null) {
-                documents.addAll(current.getData());
+            if (page.getData() != null) {
+                result.write(page.getData());
             }
 
-            String next = current.getNext();
-            if (next == null || next.isEmpty() || next.equals(previousNext)) {
-                return documents;
+            var next = page.getNext();
+            if (next == null || next.isEmpty() || result.count() >= limit || !visitedCursors.add(next)) {
+                return;
             }
 
-            String query = URI.create(next).getRawQuery();
-            current = client.getCrawlStatus(query == null ? crawlId : crawlId + "?" + query);
-            previousNext = next;
+            var query = URI.create(next).getRawQuery();
+            page = client.getCrawlStatus(query == null ? crawlId : crawlId + "?" + query);
+        }
+    }
+
+    private static void validate(boolean valid, String message) {
+        if (!valid) {
+            throw new IllegalArgumentException(message);
         }
     }
 

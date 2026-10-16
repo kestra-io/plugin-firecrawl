@@ -1,8 +1,5 @@
 package io.kestra.plugin.firecrawl;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -15,9 +12,7 @@ import com.github.tomakehurst.wiremock.junit5.WireMockTest;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
-import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
-import io.kestra.core.serializers.FileSerde;
 
 import jakarta.inject.Inject;
 
@@ -50,26 +45,22 @@ class ScrapeTest {
                 }
                 """)));
 
-        RunContext runContext = runContextFactory.of(Map.of());
+        var runContext = runContextFactory.of(Map.of());
 
-        Scrape task = Scrape.builder()
+        var task = Scrape.builder()
             .apiKey(Property.ofValue("fc-test"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .url(Property.ofValue("https://example.com"))
             .build();
 
-        Scrape.Output output = task.run(runContext);
+        var output = task.run(runContext);
 
         assertThat(output.getMarkdown(), is("# Example Domain"));
         assertThat(output.getTitle(), is("Example Domain"));
         assertThat(output.getStatusCode(), is(200));
         assertThat(output.getUri(), notNullValue());
 
-        List<Map> rows = FileSerde.readAll(
-            new BufferedReader(new InputStreamReader(runContext.storage().getFile(output.getUri()), StandardCharsets.UTF_8)),
-            Map.class
-        ).collectList().block();
-
+        var rows = IonRows.read(runContext, output.getUri());
         assertThat(rows.size(), is(1));
         assertThat(rows.getFirst().get("markdown"), is("# Example Domain"));
 
@@ -85,7 +76,7 @@ class ScrapeTest {
                 {"success": true, "data": {"markdown": "content", "links": ["https://example.com/a"], "metadata": {"statusCode": 200}}}
                 """)));
 
-        Scrape task = Scrape.builder()
+        var task = Scrape.builder()
             .apiKey(Property.ofValue("fc-test"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .url(Property.ofValue("https://example.com/blog"))
@@ -96,7 +87,7 @@ class ScrapeTest {
             .requestTimeout(Property.ofValue(Duration.ofSeconds(30)))
             .build();
 
-        Scrape.Output output = task.run(runContextFactory.of(Map.of()));
+        var output = task.run(runContextFactory.of(Map.of()));
 
         assertThat(output.getTitle(), nullValue());
 
@@ -110,24 +101,40 @@ class ScrapeTest {
 
     @Test
     void shouldNotInlineLargeMarkdown(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
-        String largeMarkdown = "a".repeat(Scrape.MAX_INLINE_MARKDOWN_LENGTH + 1);
+        var largeMarkdown = "a".repeat(Scrape.MAX_INLINE_MARKDOWN_LENGTH + 1);
         stubFor(post(urlEqualTo("/v2/scrape"))
             .willReturn(okJson("{\"success\": true, \"data\": {\"markdown\": \"" + largeMarkdown + "\"}}")));
 
-        RunContext runContext = runContextFactory.of(Map.of());
+        var runContext = runContextFactory.of(Map.of());
 
-        Scrape task = Scrape.builder()
+        var task = Scrape.builder()
             .apiKey(Property.ofValue("fc-test"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .url(Property.ofValue("https://example.com/large"))
             .build();
 
-        Scrape.Output output = task.run(runContext);
+        var output = task.run(runContext);
 
         assertThat(output.getMarkdown(), nullValue());
+        assertThat(IonRows.read(runContext, output.getUri()).getFirst().get("markdown"), is(largeMarkdown));
+    }
 
-        String stored = new String(runContext.storage().getFile(output.getUri()).readAllBytes(), StandardCharsets.UTF_8);
-        assertThat(stored, containsString(largeMarkdown));
+    @Test
+    void shouldKeepNonAsciiContent(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubFor(post(urlEqualTo("/v2/scrape"))
+            .willReturn(okJson("{\"success\": true, \"data\": {\"markdown\": \"# Caf\u00e9 \u65e5\u672c\u8a9e \u2713\"}}")));
+
+        var runContext = runContextFactory.of(Map.of());
+
+        var task = Scrape.builder()
+            .apiKey(Property.ofValue("fc-test"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .url(Property.ofValue("https://example.com/unicode"))
+            .build();
+
+        var output = task.run(runContext);
+
+        assertThat(IonRows.read(runContext, output.getUri()).getFirst().get("markdown"), is("# Caf\u00e9 \u65e5\u672c\u8a9e \u2713"));
     }
 
     @Test
@@ -136,18 +143,18 @@ class ScrapeTest {
             .withHeader("Authorization", equalTo("Bearer fc-rendered"))
             .willReturn(okJson("{\"success\": true, \"data\": {\"markdown\": \"ok\", \"metadata\": {\"statusCode\": 200}}}")));
 
-        RunContext runContext = runContextFactory.of(Map.of(
+        var runContext = runContextFactory.of(Map.of(
             "key", "fc-rendered",
             "target", "https://example.com/rendered"
         ));
 
-        Scrape task = Scrape.builder()
+        var task = Scrape.builder()
             .apiKey(Property.ofExpression("{{ key }}"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .url(Property.ofExpression("{{ target }}"))
             .build();
 
-        Scrape.Output output = task.run(runContext);
+        var output = task.run(runContext);
 
         assertThat(output.getMarkdown(), is("ok"));
         verify(postRequestedFor(urlEqualTo("/v2/scrape"))
@@ -155,18 +162,19 @@ class ScrapeTest {
     }
 
     @Test
-    void shouldFailWhenScrapeFails(WireMockRuntimeInfo wmRuntimeInfo) {
+    void shouldFailWhenApiReturnsNoContent(WireMockRuntimeInfo wmRuntimeInfo) {
         stubFor(post(urlEqualTo("/v2/scrape"))
             .willReturn(okJson("{\"success\": false, \"error\": \"DNS resolution failed\", \"code\": \"SCRAPE_DNS_RESOLUTION_ERROR\"}")));
 
-        Scrape task = Scrape.builder()
+        var task = Scrape.builder()
             .apiKey(Property.ofValue("fc-test"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .url(Property.ofValue("https://does-not-exist.invalid"))
             .build();
 
-        // depending on the SDK version this is a FirecrawlException or an IllegalStateException raised by the task
-        assertThrows(RuntimeException.class, () -> task.run(runContextFactory.of(Map.of())));
+        var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of(Map.of())));
+
+        assertThat(exception.getMessage(), containsString("Firecrawl returned no content for https://does-not-exist.invalid"));
     }
 
     @Test
@@ -174,7 +182,7 @@ class ScrapeTest {
         stubFor(post(urlEqualTo("/v2/scrape"))
             .willReturn(unauthorized().withHeader("Content-Type", "application/json").withBody("{\"success\": false, \"error\": \"Unauthorized\"}")));
 
-        Scrape task = Scrape.builder()
+        var task = Scrape.builder()
             .apiKey(Property.ofValue("invalid"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .url(Property.ofValue("https://example.com"))

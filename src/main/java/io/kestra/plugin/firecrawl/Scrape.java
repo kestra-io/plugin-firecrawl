@@ -4,7 +4,6 @@ import java.net.URI;
 import java.util.List;
 import java.util.Map;
 
-import com.firecrawl.client.FirecrawlClient;
 import com.firecrawl.models.Document;
 
 import io.kestra.core.models.annotations.Example;
@@ -71,9 +70,6 @@ import lombok.experimental.SuperBuilder;
 )
 public class Scrape extends AbstractFirecrawl implements RunnableTask<Scrape.Output> {
 
-    /**
-     * Inline markdown is capped so large pages do not bloat the execution outputs; the full content is always in {@code uri}.
-     */
     static final int MAX_INLINE_MARKDOWN_LENGTH = 100_000;
 
     @Schema(
@@ -86,23 +82,30 @@ public class Scrape extends AbstractFirecrawl implements RunnableTask<Scrape.Out
 
     @Override
     public Output run(RunContext runContext) throws Exception {
-        String renderedUrl = runContext.render(this.url).as(String.class).orElseThrow();
+        var renderedUrl = runContext.render(this.url).as(String.class)
+            .orElseThrow(() -> new IllegalArgumentException("url is required"));
 
-        FirecrawlClient client = this.client(runContext);
-        Document document = client.scrape(renderedUrl, this.scrapeOptions(runContext));
+        var client = this.client(runContext);
+        var document = client.scrape(renderedUrl, this.scrapeOptions(runContext));
 
-        // Some SDK versions do not raise an error when the API answers `success: false`, they return an empty document instead.
+        // SDK 1.18.0 returns an empty document instead of raising when the API answers `success: false`
         if (isEmpty(document)) {
             throw new IllegalStateException("Firecrawl returned no content for " + renderedUrl);
         }
 
         runContext.logger().info("Scraped {}", renderedUrl);
 
-        Map<String, Object> metadata = document.getMetadata() == null ? Map.of() : document.getMetadata();
-        String markdown = document.getMarkdown();
+        URI uri;
+        try (var result = ResultFile.create(runContext)) {
+            result.write(List.of(document));
+            uri = result.upload();
+        }
+
+        var metadata = document.getMetadata() == null ? Map.<String, Object>of() : document.getMetadata();
+        var markdown = document.getMarkdown();
 
         return Output.builder()
-            .uri(this.store(runContext, List.of(document)))
+            .uri(uri)
             .markdown(markdown != null && markdown.length() <= MAX_INLINE_MARKDOWN_LENGTH ? markdown : null)
             .title(metadata.get("title") instanceof String title ? title : null)
             .statusCode(metadata.get("statusCode") instanceof Number code ? code.intValue() : null)
