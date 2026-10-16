@@ -1,8 +1,8 @@
 group: io.kestra.plugin.firecrawl
 name: "firecrawl"
 title: "Firecrawl"
-description: "Firecrawl plugin for Kestra"
-body: ""
+description: "Tasks that scrape and crawl websites into clean, LLM-ready content with Firecrawl."
+body: "Provide your Firecrawl API key to scrape a single page or crawl a whole site into markdown, HTML or links, and store the results in Kestra's internal storage for downstream tasks such as RAG ingestion, content monitoring or data collection."
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"

@@ -3,13 +3,13 @@
 ## What
 
 - Provides plugin components under `io.kestra.plugin.firecrawl`.
-- Includes classes such as `Example`, `Trigger`.
+- Includes classes such as `Scrape`, `Crawl`.
 
 ## Why
 
-- What user problem does this solve? Teams need a concrete starting point for building and validating new Kestra plugins without recreating the same project scaffolding from scratch.
-- Why would a team adopt this plugin in a workflow? It gives plugin authors a ready-made reference repo they can adapt alongside their own build, test, and publishing workflow.
-- What operational/business outcome does it enable? It shortens plugin delivery time, reduces setup mistakes, and makes internal or partner plugin development more repeatable.
+- What user problem does this solve? Flows that feed RAG pipelines, monitor web pages or collect web data need clean page content from Firecrawl without rewriting the asynchronous crawl loop.
+- Why would a team adopt this plugin in a workflow? It scrapes or crawls sites in one task, stores the results in internal storage and cancels crawls when the task is killed.
+- What operational/business outcome does it enable? Web ingestion becomes a declarative, retryable workflow step.
 
 ## How
 
@@ -21,11 +21,12 @@ Single-module plugin. Source packages under `io.kestra.plugin`:
 
 Infrastructure dependencies (Docker Compose services):
 
-- `app`
+- none (tests use WireMock)
 
 ### Key Plugin Classes
 
-- `io.kestra.plugin.firecrawl.Example`
+- `io.kestra.plugin.firecrawl.Scrape`
+- `io.kestra.plugin.firecrawl.Crawl`
 
 ### Project Structure
 
