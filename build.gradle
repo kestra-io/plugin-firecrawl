@@ -51,7 +51,7 @@ dependencies {
     compileOnly group: "io.kestra", name: "script", version: kestraVersion
 
     // firecrawl
-    implementation 'com.firecrawl:firecrawl-java:1.18.0'
+    implementation 'com.firecrawl:firecrawl-java:1.18.7'
 }
 
 
